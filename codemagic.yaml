@@ -1,0 +1,44 @@
+workflows:
+  ios-unsigned:
+    name: iOS Unsigned Build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      java: 17
+      xcode: latest
+      vars:
+        NUVIO_IOS_DISTRIBUTION: "appstore"
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: '*'
+          include: true
+    scripts:
+      - name: Initialize Git submodules
+        script: |
+          git submodule update --init --recursive
+      - name: Set up Gradle gradlew executable
+        script: |
+          chmod +x gradlew
+      - name: Build iOS Unsigned Archive
+        script: |
+          xcodebuild archive \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/ios/archive/iosApp.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+      - name: Package Unsigned IPA
+        script: |
+          mkdir -p build/ios/ipa/Payload
+          cp -r build/ios/archive/iosApp.xcarchive/Products/Applications/Nuvio.app build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -r ../../Nuvio-unsigned.ipa Payload
+    artifacts:
+      - build/*.ipa
