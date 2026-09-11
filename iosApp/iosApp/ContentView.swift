@@ -234,17 +234,23 @@ enum NuvioAppTab: String, CaseIterable, Hashable {
     case home = "Home"
     case search = "Search"
     case library = "Library"
+    case manga = "Manga"
     case settings = "Settings"
 
     var fallbackTitle: String {
-        String(localized: String.LocalizationValue(rawValue))
+        switch self {
+        case .manga: return "Truyện"
+        case .library: return "IPTV"
+        default: return String(localized: String.LocalizationValue(rawValue))
+        }
     }
 
     static func from(kotlinName: String?) -> NuvioAppTab? {
         switch kotlinName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "home": return .home
         case "search": return .search
-        case "library": return .library
+        case "library", "iptv": return .library
+        case "manga": return .manga
         case "settings", "profile": return .settings
         default: return nil
         }
@@ -255,6 +261,7 @@ enum NuvioAppTab: String, CaseIterable, Hashable {
         case .home: return "NuvioTabHome"
         case .search: return "NuvioTabSearch"
         case .library: return "NuvioTabLibrary"
+        case .manga: return "NuvioTabManga"
         case .settings: return "NuvioTabProfile"
         }
     }
@@ -263,7 +270,8 @@ enum NuvioAppTab: String, CaseIterable, Hashable {
         switch self {
         case .home: return "house.fill"
         case .search: return "magnifyingglass"
-        case .library: return "rectangle.stack.fill"
+        case .library: return "tv.fill"
+        case .manga: return "book.pages.fill"
         case .settings: return "person.crop.circle.fill"
         }
     }
@@ -273,6 +281,10 @@ private enum NuvioNativeTabIcon {
     private static let legacyStaticIconSize = CGSize(width: 25, height: 25)
 
     static func image(for tab: NuvioAppTab) -> UIImage {
+        if tab == .library {
+            return (UIImage(systemName: "tv.fill") ?? UIImage())
+                .withRenderingMode(.alwaysTemplate)
+        }
         if let asset = UIImage(named: tab.iconAssetName) {
             return UIGraphicsImageRenderer(size: legacyStaticIconSize).image { _ in
                 asset
@@ -540,6 +552,8 @@ final class NativeProfileTabInteractionCoordinator: NSObject, UIGestureRecognize
 @MainActor
 final class AppNavigationCoordinator: ObservableObject {
     @Published var selectedTab: NuvioAppTab = .home
+    @Published private(set) var isMainContentMounted = false
+    @Published private(set) var isMainContentVisible = false
     @Published private(set) var isAppReady = false
     @Published private var localizedTabTitles: [NuvioAppTab: String] = [:]
     @Published private(set) var localizedSwitchProfileTitle = ""
@@ -549,7 +563,9 @@ final class AppNavigationCoordinator: ObservableObject {
     let homeCoordinator = TabNavigationCoordinator()
     let searchCoordinator = TabNavigationCoordinator()
     let libraryCoordinator = TabNavigationCoordinator()
+    let mangaCoordinator = TabNavigationCoordinator()
     let settingsCoordinator = TabNavigationCoordinator()
+    let appGateController = AppGateController()
     let profileSwitcherController = NativeProfileSwitcherController()
     let profileTabInteraction = NativeProfileTabInteractionCoordinator()
 
@@ -561,7 +577,7 @@ final class AppNavigationCoordinator: ObservableObject {
     }
 
     private var allCoordinators: [TabNavigationCoordinator] {
-        [homeCoordinator, searchCoordinator, libraryCoordinator, settingsCoordinator]
+        [homeCoordinator, searchCoordinator, libraryCoordinator, mangaCoordinator, settingsCoordinator]
     }
 
     func coordinator(for tab: NuvioAppTab) -> TabNavigationCoordinator {
@@ -569,6 +585,7 @@ final class AppNavigationCoordinator: ObservableObject {
         case .home: return homeCoordinator
         case .search: return searchCoordinator
         case .library: return libraryCoordinator
+        case .manga: return mangaCoordinator
         case .settings: return settingsCoordinator
         }
     }
@@ -581,7 +598,10 @@ final class AppNavigationCoordinator: ObservableObject {
     }
 
     func title(for tab: NuvioAppTab) -> String {
-        localizedTabTitles[tab] ?? tab.fallbackTitle
+        if tab == .library {
+            return "IPTV"
+        }
+        return localizedTabTitles[tab] ?? tab.fallbackTitle
     }
 
     func updateTabTitles(
@@ -606,14 +626,24 @@ final class AppNavigationCoordinator: ObservableObject {
         isAppReady = ready
         if !ready {
             isProfileSwitcherPresented = false
-            selectedTab = .home
             allCoordinators.forEach { $0.popToRoot() }
         }
     }
 
+    func setMainContentMounted(_ mounted: Bool) {
+        isMainContentMounted = mounted
+        if !mounted {
+            isMainContentVisible = false
+            selectedTab = .home
+        }
+    }
+
+    func setMainContentVisible(_ visible: Bool) {
+        isMainContentVisible = visible
+    }
+
     func openProfileManagement() {
         isProfileSwitcherPresented = false
-        updateAppReady(false)
         profileSwitcherController.requestManageProfiles()
     }
 
@@ -679,9 +709,6 @@ struct NativeNavComposeView: UIViewControllerRepresentable {
             onActivate: { tabName in
                 appCoordinator.activateTab(named: tabName)
             },
-            onAppReady: { ready in
-                appCoordinator.updateAppReady(ready.boolValue)
-            },
             onTabTitles: { home, search, library, profile, switchProfile, addProfile in
                 appCoordinator.updateTabTitles(
                     home: home,
@@ -692,7 +719,7 @@ struct NativeNavComposeView: UIViewControllerRepresentable {
                     addProfile: addProfile
                 )
             },
-            nativeProfileSwitcherController: appCoordinator.profileSwitcherController
+            appGateController: appCoordinator.appGateController
         )
         return NuvioComposeHost.wrap(
             controller,
@@ -700,6 +727,35 @@ struct NativeNavComposeView: UIViewControllerRepresentable {
                 appCoordinator.profileTabInteraction.attach(to: tabBarController)
             }
         )
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+}
+
+@available(iOS 16.0, *)
+struct AppGateComposeView: UIViewControllerRepresentable {
+    let appCoordinator: AppNavigationCoordinator
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let controller = MainViewControllerKt.AppGateViewController(
+            appGateController: appCoordinator.appGateController,
+            nativeProfileSwitcherController: appCoordinator.profileSwitcherController,
+            onActivate: { tabName in
+                appCoordinator.activateTab(named: tabName)
+            },
+            onAppReady: { ready in
+                appCoordinator.updateAppReady(ready.boolValue)
+            },
+            onMainContentMountChanged: { mounted in
+                appCoordinator.setMainContentMounted(mounted.boolValue)
+            },
+            onMainContentVisibleChanged: { visible in
+                appCoordinator.setMainContentVisible(visible.boolValue)
+            }
+        )
+        controller.view.backgroundColor = .clear
+        controller.view.isOpaque = false
+        return controller
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
@@ -729,7 +785,8 @@ struct DetailComposeView: UIViewControllerRepresentable {
             },
             onActivate: { tabName in
                 appCoordinator.activateTab(named: tabName)
-            }
+            },
+            appGateController: appCoordinator.appGateController
         )
         return NuvioComposeHost.wrap(
             controller,
@@ -755,30 +812,40 @@ struct TabContentView: View {
                 set: { coordinator.setPath($0) }
             )
         ) {
-            NativeNavComposeView(
-                tab: tab,
-                usesNativeTabBar: usesNativeTabBar,
-                usesTabletFloatingTabBar: usesTabletFloatingTabBar,
-                coordinator: coordinator,
-                appCoordinator: appCoordinator
-            )
-            .ignoresSafeArea(.all)
-            .navigationTitle(appCoordinator.title(for: tab))
-            .navigationBarHidden(true)
-            .navigationDestination(for: RouteWrapper.self) { wrapper in
-                if appCoordinator.selectedTab == tab {
-                    DetailDestinationView(
-                        wrapper: wrapper,
-                        coordinator: coordinator,
-                        appCoordinator: appCoordinator
-                    )
-                    // A native replace keeps the same NavigationStack depth.
-                    // Keying by the wrapper forces SwiftUI to replace the
-                    // embedded Compose controller instead of reusing the old
-                    // screen with the new route's toolbar preferences.
-                    .id(wrapper.id)
-                } else {
-                    Color.clear
+            if tab == .manga {
+                MangaCatalogView()
+                    .navigationTitle(appCoordinator.title(for: tab))
+                    .navigationBarHidden(true)
+            } else if tab == .library {
+                IPTVCatalogView()
+                    .navigationTitle(appCoordinator.title(for: tab))
+                    .navigationBarHidden(true)
+            } else {
+                NativeNavComposeView(
+                    tab: tab,
+                    usesNativeTabBar: usesNativeTabBar,
+                    usesTabletFloatingTabBar: usesTabletFloatingTabBar,
+                    coordinator: coordinator,
+                    appCoordinator: appCoordinator
+                )
+                .ignoresSafeArea(.all)
+                .navigationTitle(appCoordinator.title(for: tab))
+                .navigationBarHidden(true)
+                .navigationDestination(for: RouteWrapper.self) { wrapper in
+                    if appCoordinator.selectedTab == tab {
+                        DetailDestinationView(
+                            wrapper: wrapper,
+                            coordinator: coordinator,
+                            appCoordinator: appCoordinator
+                        )
+                        // A native replace keeps the same NavigationStack depth.
+                        // Keying by the wrapper forces SwiftUI to replace the
+                        // embedded Compose controller instead of reusing the old
+                        // screen with the new route's toolbar preferences.
+                        .id(wrapper.id)
+                    } else {
+                        Color.clear
+                    }
                 }
             }
         }
@@ -786,7 +853,7 @@ struct TabContentView: View {
         // stack. Applying it here keeps the authentication/profile gate truly
         // full-screen on iOS 26, where a modifier on TabView itself is ignored.
         .toolbar(
-            usesNativeTabBar && appCoordinator.isAppReady && coordinator.path.isEmpty
+            usesNativeTabBar && appCoordinator.isMainContentVisible && coordinator.path.isEmpty
                 ? Visibility.visible
                 : Visibility.hidden,
             for: .tabBar
@@ -1302,10 +1369,26 @@ struct NativeNavContentView: View {
 
     @ViewBuilder
     var body: some View {
-        if #available(iOS 26.0, *), usesNativeTabBar {
-            nativeTabs
-        } else {
-            legacyTabs
+        ZStack {
+            Group {
+                if appCoordinator.isMainContentMounted {
+                    if #available(iOS 26.0, *), usesNativeTabBar {
+                        nativeTabs
+                    } else {
+                        legacyTabs
+                    }
+                } else {
+                    Color(uiColor: nuvioBackgroundColor)
+                        .ignoresSafeArea(.all)
+                }
+            }
+            .zIndex(0)
+
+            AppGateComposeView(appCoordinator: appCoordinator)
+                .ignoresSafeArea(.all)
+                .allowsHitTesting(!appCoordinator.isAppReady)
+                .accessibilityHidden(appCoordinator.isAppReady)
+                .zIndex(1)
         }
     }
 }
